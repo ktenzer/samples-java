@@ -19,6 +19,7 @@
 
 package io.temporal.samples.resetworkflows;
 
+import com.google.protobuf.ByteString;
 import io.temporal.api.enums.v1.WorkflowExecutionStatus;
 import io.temporal.api.workflow.v1.WorkflowExecutionInfo;
 import io.temporal.api.workflowservice.v1.ListWorkflowExecutionsRequest;
@@ -29,7 +30,10 @@ import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.serviceclient.WorkflowServiceStubs;
-import java.util.List;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 public class Starter {
@@ -50,96 +54,93 @@ public class Starter {
       throw new RuntimeException("Exception happened in thread sleep: ", e);
     }
 
-    // query "new" customers for all "CustomerWorkflow" workflows with status "Running" (1)
-    ListWorkflowExecutionsResponse listFailedWorkflows =
-        getExecutionsResponse(
-            "WorkflowType='ResetWorkflow' and ExecutionStatus="
-                + WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_FAILED_VALUE);
+    String fiveMinutesAgo = dateOffset(20);
+    resetWorkflowExecutions(
+        "WorkflowType='ResetWorkflow' and ExecutionStatus="
+            + WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_FAILED_VALUE
+            + " and CloseTime>"
+            + "'"
+            + fiveMinutesAgo
+            + "'",
+        null);
 
     // sleep for 3 seconds before we shut down the worker
     sleep(5);
 
-    List<WorkflowExecutionInfo> newExecutionInfo = listFailedWorkflows.getExecutionsList();
-    batchResetWorkflows(newExecutionInfo);
-    // for (WorkflowExecutionInfo wei : newExecutionInfo) {
-    //  System.out.println("Resetting workflow: " + wei.getExecution().getWorkflowId());
-    //  System.out.println(wei.getStatusValue());
-    //  resetWorkflow(wei.getExecution().getWorkflowId());
-    // }
-
+    // Cleanup
+    service.shutdown();
     System.exit(0);
   }
 
-  private static ListWorkflowExecutionsResponse getExecutionsResponse(String query) {
-    ListWorkflowExecutionsRequest listWorkflowExecutionRequest =
-        ListWorkflowExecutionsRequest.newBuilder()
-            .setNamespace(client.getOptions().getNamespace())
-            .setQuery(query)
-            .build();
-    ListWorkflowExecutionsResponse listWorkflowExecutionsResponse =
-        service.blockingStub().listWorkflowExecutions(listWorkflowExecutionRequest);
-    return listWorkflowExecutionsResponse;
-  }
+  private static void resetWorkflowExecutions(String query, ByteString token) {
 
-  //  private static void resetWorkflow(String workflowId) {
-  //    long eventId = 3;
-  //    WorkflowStub existingUntyped = client.newUntypedWorkflowStub(workflowId);
-  //
-  //    ResetWorkflowExecutionRequest resetWorkflowExecutionRequest =
-  //        ResetWorkflowExecutionRequest.newBuilder()
-  //            .setRequestId(UUID.randomUUID().toString())
-  //            .setNamespace("default")
-  //            .setWorkflowExecution(existingUntyped.getExecution())
-  //            .setWorkflowTaskFinishEventId(eventId)
-  //            .setReason("Doing a workflow reset...")
-  //            .build();
-  //
-  //    try {
-  //      ResetWorkflowExecutionResponse resetWorkflowExecutionResponse =
-  //          service.blockingStub().resetWorkflowExecution(resetWorkflowExecutionRequest);
-  //      System.out.println(
-  //          "Workflow with ID "
-  //              + workflowId
-  //              + " has been reset. New RunId: "
-  //              + resetWorkflowExecutionResponse.getRunId());
-  //    } catch (Exception e) {
-  //      System.err.println("Failed to reset workflow with ID " + workflowId);
-  //    }
-  //
-  //    // Cleanup
-  //    service.shutdown();
-  //  }
+    ListWorkflowExecutionsRequest request;
 
-  private static void batchResetWorkflows(List<WorkflowExecutionInfo> newExecutionInfo) {
-    for (WorkflowExecutionInfo wei : newExecutionInfo) {
-      String workflowId = wei.getExecution().getWorkflowId();
-      long eventId = 3;
-      WorkflowStub existingUntyped = client.newUntypedWorkflowStub(workflowId);
-
-      ResetWorkflowExecutionRequest resetWorkflowExecutionRequest =
-          ResetWorkflowExecutionRequest.newBuilder()
-              .setNamespace("default")
-              .setWorkflowExecution(existingUntyped.getExecution())
-              .setWorkflowTaskFinishEventId(eventId)
-              .setRequestId(java.util.UUID.randomUUID().toString())
-              .setReason("Doing a batch reset...")
+    if (token == null) {
+      request =
+          ListWorkflowExecutionsRequest.newBuilder()
+              .setNamespace(client.getOptions().getNamespace())
+              .setQuery(query)
               .build();
+    } else {
+      request =
+          ListWorkflowExecutionsRequest.newBuilder()
+              .setNamespace(client.getOptions().getNamespace())
+              .setQuery(query)
+              .setNextPageToken(token)
+              .build();
+    }
 
-      try {
-        ResetWorkflowExecutionResponse resetWorkflowExecutionResponse =
-            service.blockingStub().resetWorkflowExecution(resetWorkflowExecutionRequest);
+    ListWorkflowExecutionsResponse response =
+        service.blockingStub().listWorkflowExecutions(request);
+
+    for (WorkflowExecutionInfo workflowExecutionInfo : response.getExecutionsList()) {
+      System.out.println(
+          "Workflow ID: "
+              + workflowExecutionInfo.getExecution().getWorkflowId()
+              + " Run ID: "
+              + workflowExecutionInfo.getExecution().getRunId()
+              + " Status: "
+              + workflowExecutionInfo.getStatus());
+      if (workflowExecutionInfo.getParentExecution() != null) {
         System.out.println(
-            "Workflow with ID "
-                + workflowId
-                + " has been reset. New RunId: "
-                + resetWorkflowExecutionResponse.getRunId());
-      } catch (Exception e) {
-        System.err.println("Failed to reset workflow with ID " + workflowId);
+            "****** PARENT: "
+                + workflowExecutionInfo.getExecution().getWorkflowId()
+                + " - "
+                + workflowExecutionInfo.getExecution().getRunId());
+        resetWorkflow(workflowExecutionInfo.getExecution().getWorkflowId());
       }
     }
 
-    // Cleanup
-    service.shutdown();
+    if (response.getNextPageToken() != null && response.getNextPageToken().size() > 0) {
+      resetWorkflowExecutions(query, response.getNextPageToken());
+    }
+  }
+
+  private static void resetWorkflow(String workflowId) {
+    long eventId = 3;
+    WorkflowStub existingUntyped = client.newUntypedWorkflowStub(workflowId);
+
+    ResetWorkflowExecutionRequest resetWorkflowExecutionRequest =
+        ResetWorkflowExecutionRequest.newBuilder()
+            .setRequestId(UUID.randomUUID().toString())
+            .setNamespace("default")
+            .setWorkflowExecution(existingUntyped.getExecution())
+            .setWorkflowTaskFinishEventId(eventId)
+            .setReason("Doing a workflow reset...")
+            .build();
+
+    try {
+      ResetWorkflowExecutionResponse resetWorkflowExecutionResponse =
+          service.blockingStub().resetWorkflowExecution(resetWorkflowExecutionRequest);
+      System.out.println(
+          "Workflow with ID "
+              + workflowId
+              + " has been reset. New RunId: "
+              + resetWorkflowExecutionResponse.getRunId());
+    } catch (Exception e) {
+      System.err.println("Failed to reset workflow with ID " + workflowId);
+    }
   }
 
   private static void startWorkflow() {
@@ -167,5 +168,16 @@ public class Starter {
       System.out.println("Exception: " + e.getMessage());
       System.exit(0);
     }
+  }
+
+  private static String dateOffset(long seconds) {
+    long currentTimeMillis = System.currentTimeMillis() - (seconds * 1000);
+    OffsetDateTime offsetDateTime =
+        OffsetDateTime.ofInstant(java.time.Instant.ofEpochMilli(currentTimeMillis), ZoneOffset.UTC);
+
+    DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXXX");
+    String formattedDateTime = offsetDateTime.format(formatter);
+
+    return formattedDateTime;
   }
 }
